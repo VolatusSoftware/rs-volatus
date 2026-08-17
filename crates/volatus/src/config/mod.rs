@@ -2,7 +2,7 @@ use std::{collections::VecDeque, fmt::Debug};
 
 #[derive(Debug, PartialEq)]
 pub enum Value {
-    Vacant,
+    Vacant, // Filler when an element has been "removed" but don't want to shuffle indices
     None,
     Str(String),
     Bool(bool),
@@ -35,7 +35,7 @@ fn validate_elem_name(name: &str) -> Result<(), String> {
 #[derive(Debug)]
 pub struct Manager {
     elems: Vec<Element>,
-    vacant: Vec<ElementIdx>,
+    vacant: Vec<ElementIdx>, // Tracks available vacant positions in the elems vector
 }
 
 impl Manager {
@@ -50,6 +50,7 @@ impl Manager {
         }
     }
 
+    /// Creates a new element in the tree, optional as a child of an existing parent.
     pub fn create(
         &mut self,
         name: &str,
@@ -80,6 +81,7 @@ impl Manager {
         Ok(idx)
     }
 
+    /// Removes an element from the tree along with all of its descendents.
     pub fn remove(&mut self, idx: ElementIdx) -> Result<(), String> {
         let mut to_remove = VecDeque::<ElementIdx>::from([idx]);
 
@@ -103,22 +105,29 @@ impl Manager {
         Ok(())
     }
 
+    /// Returns the number of active elements in the tree. This does not include the
+    /// hidden root element.
     pub fn len(&self) -> usize {
         self.elems.len() - 1 - self.vacant.len()
     }
 
+    /// Returns the name of an element given its index.
     pub fn name(&self, idx: ElementIdx) -> &str {
         &self.elems[idx].name
     }
 
+    /// Returns an immutable reference of an element's value given its index.
+    /// Use `value_mut()` for a mutable reference.
     pub fn value(&self, idx: ElementIdx) -> &Value {
         &self.elems[idx].value
     }
 
+    /// Returns a mutable reference to an element's value so it can be changed.
     pub fn value_mut(&mut self, idx: ElementIdx) -> &mut Value {
         &mut self.elems[idx].value
     }
 
+    /// Changes the name for an element given its index and the new name.
     pub fn rename(&mut self, idx: ElementIdx, name: &str) -> Result<(), String> {
         validate_elem_name(name)?;
 
@@ -127,6 +136,8 @@ impl Manager {
         Ok(())
     }
 
+    /// Retrieves an element at the specified hierarchy. Any ancestor elements in the hierarchy
+    /// that do not exist will be created along with the element itself.
     pub fn obtain(&mut self, hierarchy: &Vec<&str>) -> Result<ElementIdx, String> {
         let mut child_found;
         let mut idx = 0;
@@ -155,6 +166,8 @@ impl Manager {
         Ok(idx)
     }
 
+    /// Retrieves an element index given its named hierarchy. If the element does not
+    /// exist, `None` will be returned.
     pub fn lookup(&self, hierarchy: &Vec<&str>) -> Option<ElementIdx> {
         let mut idx: ElementIdx = 0;
         let mut child_found;
@@ -177,14 +190,19 @@ impl Manager {
         Some(idx)
     }
 
+    /// Returns the parent index of the specified element, or `None` if the element
+    /// does not have a parent.
     pub fn parent(&self, idx: ElementIdx) -> Option<ElementIdx> {
         self.elems[idx].parent
     }
 
+    /// Returns whether or not the element index contains a vacant slot.
+    /// This means the index is not valid for other operations.
     pub fn is_vacant(&self, idx: ElementIdx) -> bool {
         self.elems[idx].value == Value::Vacant
     }
 
+    /// Returns the name hierarchy of the specified element index.
     pub fn hierarchy(&self, e: ElementIdx) -> Vec<String> {
         let mut h = vec![];
         let mut idx = e;
