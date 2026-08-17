@@ -1,7 +1,8 @@
-use std::fmt::Debug;
+use std::{collections::VecDeque, fmt::Debug};
 
 #[derive(Debug, PartialEq)]
 pub enum Value {
+    Vacant,
     None,
     Str(String),
     Bool(bool),
@@ -21,9 +22,20 @@ pub enum Value {
 
 type ElementIdx = usize;
 
+fn validate_elem_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "Meta" || name == "Value" {
+        return Err(format!(
+            "Element name '{name}' cannot be empty or the reserved strings 'Meta' or 'Value'."
+        ));
+    }
+
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct Manager {
     elems: Vec<Element>,
+    vacant: Vec<ElementIdx>,
 }
 
 impl Manager {
@@ -34,20 +46,23 @@ impl Manager {
                 // It's created as an object since it will hold named elements.
                 Element::new("", Value::Object),
             ],
+            vacant: vec![],
         }
     }
 
-    pub fn create_element(
+    pub fn create(
         &mut self,
         name: &str,
         value: Value,
         parent: Option<ElementIdx>,
     ) -> Result<ElementIdx, String> {
-        if name.is_empty() || name == "Meta" || name == "Value" {
-            return Err(format!("Element name '{name}' cannot be empty or the reserved strings 'Meta' or 'Value'."));
-        }
+        validate_elem_name(name)?;
 
-        let idx = self.elems.len();
+        let idx = if self.vacant.len() > 0 {
+            self.vacant.pop().unwrap()
+        } else {
+            self.elems.len()
+        };
         self.elems.push(Element::new(name, value));
 
         // New elements are always linked to from a parent
@@ -65,6 +80,33 @@ impl Manager {
         Ok(idx)
     }
 
+    pub fn remove(&mut self, idx: ElementIdx) -> Result<(), String> {
+        let mut to_remove = VecDeque::<ElementIdx>::from([idx]);
+
+        let p = self.parent(idx).unwrap_or_else(|| 0);
+        self.elems[p].children.retain(|&x| x != idx);
+
+        while !to_remove.is_empty() {
+            let idx = to_remove.pop_front().unwrap();
+            for child_idx in &self.elems[idx].children {
+                to_remove.push_back(*child_idx);
+            }
+
+            // To make sure existing indices aren't invalidated and don't have
+            //  to be adjusted, a "blank" is replaced into the vec.
+            // The position is tracked in vacant so the now "blank" position can
+            //  be used for new elements.
+            self.vacant.push(idx);
+            self.elems[idx].value = Value::Vacant;
+        }
+
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.elems.len() - 1 - self.vacant.len()
+    }
+
     pub fn name(&self, idx: ElementIdx) -> &str {
         &self.elems[idx].name
     }
@@ -73,14 +115,54 @@ impl Manager {
         &self.elems[idx].value
     }
 
-    pub fn lookup_element(&self, hierarchy: Vec<&str>) -> Option<ElementIdx> {
+    pub fn value_mut(&mut self, idx: ElementIdx) -> &mut Value {
+        &mut self.elems[idx].value
+    }
+
+    pub fn rename(&mut self, idx: ElementIdx, name: &str) -> Result<(), String> {
+        validate_elem_name(name)?;
+
+        self.elems[idx].name = name.to_owned();
+
+        Ok(())
+    }
+
+    pub fn obtain(&mut self, hierarchy: &Vec<&str>) -> Result<ElementIdx, String> {
+        let mut child_found;
+        let mut idx = 0;
+
+        for name in hierarchy {
+            child_found = false;
+
+            for child_idx in &self.elems[idx].children {
+                if self.name(*child_idx) == *name {
+                    idx = *child_idx;
+                    child_found = true;
+                    break;
+                }
+            }
+
+            if !child_found {
+                let e =
+                    self.create(*name, Value::None, if idx > 0 { Some(idx) } else { None });
+                match e {
+                    Ok(new_idx) => idx = new_idx,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        Ok(idx)
+    }
+
+    pub fn lookup(&self, hierarchy: &Vec<&str>) -> Option<ElementIdx> {
         let mut idx: ElementIdx = 0;
         let mut child_found;
         for name in hierarchy {
             child_found = false;
 
             for child_idx in &self.elems[idx].children {
-                if self.name(*child_idx) == name {
+                if self.name(*child_idx) == *name {
                     idx = *child_idx;
                     child_found = true;
                     break;
@@ -95,11 +177,15 @@ impl Manager {
         Some(idx)
     }
 
-    pub fn parent_of(&self, idx: ElementIdx) -> Option<ElementIdx> {
+    pub fn parent(&self, idx: ElementIdx) -> Option<ElementIdx> {
         self.elems[idx].parent
     }
 
-    pub fn hierarchy_for(&self, e: ElementIdx) -> Vec<String> {
+    pub fn is_vacant(&self, idx: ElementIdx) -> bool {
+        self.elems[idx].value == Value::Vacant
+    }
+
+    pub fn hierarchy(&self, e: ElementIdx) -> Vec<String> {
         let mut h = vec![];
         let mut idx = e;
 
@@ -119,7 +205,6 @@ impl Manager {
     }
 }
 
-//#[derive(Debug)]
 struct Element {
     name: String,
     value: Value,
@@ -164,49 +249,100 @@ mod tests {
     #[test]
     fn empty_element_name_fails() {
         let mut m = Manager::new();
-        assert!(m.create_element("", Value::None, None).is_err());
+        assert!(m.create("", Value::None, None).is_err());
     }
 
     #[test]
     fn reserved_element_name_fails() {
         let mut m = Manager::new();
-        assert!(m.create_element("Meta", Value::None, None).is_err());
-        assert!(m.create_element("Value", Value::None, None).is_err());
+        assert!(m.create("Meta", Value::None, None).is_err());
+        assert!(m.create("Value", Value::None, None).is_err());
+    }
+
+    #[test]
+    fn reserved_rename_fails() {
+        let mut m = Manager::new();
+        let e = m.create("alpha", Value::None, None).unwrap();
+        assert!(m.rename(e, "Meta").is_err());
+    }
+
+    #[test]
+    fn rename_element() {
+        let mut m = Manager::new();
+        let e = m.create("alpha", Value::None, None).unwrap();
+        m.rename(e, "beta").unwrap();
+        assert_eq!(m.name(e), "beta");
     }
 
     #[test]
     fn create_element() {
         let mut m = Manager::new();
-        let e = m.create_element("alpha", Value::Str(String::from("Meowdy")), None).unwrap();
+        let e = m
+            .create("alpha", Value::Str(String::from("Meowdy")), None)
+            .unwrap();
         assert_eq!(m.name(e), "alpha");
     }
 
     #[test]
     fn create_child_get_hierarchy() {
         let mut m = Manager::new();
-        let parent = m.create_element("parent", Value::I32(42), None).unwrap();
-        let child = m.create_element("child", Value::Bool(true), Some(parent)).unwrap();
+        let parent = m.create("parent", Value::I32(42), None).unwrap();
+        let child = m
+            .create("child", Value::Bool(true), Some(parent))
+            .unwrap();
 
-        assert_eq!(m.hierarchy_for(child), vec!["parent", "child"]);
+        assert_eq!(m.hierarchy(child), vec!["parent", "child"]);
     }
 
     #[test]
     fn traverse_to_parent() {
         let mut m = Manager::new();
-        let p = m.create_element("parent", Value::None, None).unwrap();
-        let c = m.create_element("child", Value::None, Some(p)).unwrap();
+        let p = m.create("parent", Value::None, None).unwrap();
+        let c = m.create("child", Value::None, Some(p)).unwrap();
 
-        let tp = m.parent_of(c).unwrap();
+        let tp = m.parent(c).unwrap();
         assert_eq!(m.name(tp), "parent");
     }
 
     #[test]
     fn lookup_hierarchy() {
         let mut m = Manager::new();
-        let p = m.create_element("parent", Value::None, None).unwrap();
-        let _c = m.create_element("child", Value::I32(42), Some(p)).unwrap();
+        let p = m.create("parent", Value::None, None).unwrap();
+        let _c = m.create("child", Value::I32(42), Some(p)).unwrap();
 
-        let e = m.lookup_element(vec!["parent", "child"]).unwrap();
+        let e = m.lookup(&vec!["parent", "child"]).unwrap();
         assert_eq!(*m.value(e), Value::I32(42));
+    }
+
+    #[test]
+    fn change_value() {
+        let mut m = Manager::new();
+        let e = m.create("alpha", Value::None, None).unwrap();
+        *m.value_mut(e) = Value::Bool(true);
+        assert_eq!(*m.value(e), Value::Bool(true));
+    }
+
+    #[test]
+    fn create_via_obtain() {
+        let mut m = Manager::new();
+        let _ = m.create("alpha", Value::None, None).unwrap();
+        let e = m.obtain(&vec!["alpha", "beta", "gamma"]).unwrap();
+        assert_eq!(m.hierarchy(e), vec!["alpha", "beta", "gamma"]);
+        assert_eq!(m.len(), 3);
+    }
+
+    #[test]
+    fn remove_subtree() {
+        let mut m = Manager::new();
+        let a = m.create("a", Value::None, None).unwrap();
+        let b = m.create("b", Value::None, Some(a)).unwrap();
+        let c = m.create("c", Value::None, Some(a)).unwrap();
+        let d = m.create("d", Value::None, Some(c)).unwrap();
+
+        m.remove(c).unwrap();
+        
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.hierarchy(b), vec!["a", "b"]);
+        assert!(m.is_vacant(d));
     }
 }
