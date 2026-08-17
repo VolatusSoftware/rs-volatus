@@ -13,5 +13,5 @@ fn main() {
         .create_element("delta", Value::Bool(false), Some(p))
         .unwrap();
 
-    println!("{m:#?}");
+    println!("{m:?}");
 }

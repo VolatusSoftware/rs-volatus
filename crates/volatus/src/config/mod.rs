@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 #[derive(Debug, PartialEq)]
 pub enum Value {
     None,
@@ -117,7 +119,7 @@ impl Manager {
     }
 }
 
-#[derive(Debug)]
+//#[derive(Debug)]
 struct Element {
     name: String,
     value: Value,
@@ -134,6 +136,24 @@ impl Element {
             parent: None,
             children: vec![],
         }
+    }
+}
+
+impl Debug for Element {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("");
+        d.field("name", &self.name);
+        d.field("value", &self.value);
+
+        if let Some(p) = self.parent {
+            d.field("parent", &p);
+        }
+
+        if self.children.len() > 0 {
+            d.field("children", &self.children);
+        }
+
+        d.finish()
     }
 }
 
