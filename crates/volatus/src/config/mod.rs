@@ -1,4 +1,7 @@
-use std::{collections::{BTreeMap, VecDeque}, fmt::Debug};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fmt::Debug,
+};
 
 #[derive(Debug, PartialEq)]
 pub enum Value {
@@ -30,6 +33,55 @@ fn validate_elem_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug)]
+enum Lookup<'a> {
+    Name(&'a str),
+    HasMeta(&'a str),
+    Meta { name: &'a str, value: &'a str },
+}
+
+#[derive(Debug)]
+pub struct ElemLookup<'a> {
+    lookups: Vec<Lookup<'a>>,
+}
+
+impl <'a> ElemLookup<'a> {
+    pub fn new() -> Self {
+        ElemLookup { lookups: vec![] }
+    }
+
+    pub fn match_name(mut self, name: &'a str) -> Self {
+        self.lookups.push(Lookup::Name(name));
+        self
+    }
+
+    pub fn match_has_meta(mut self, name: &'a str) -> Self {
+        self.lookups.push(Lookup::HasMeta(name));
+        self
+    }
+
+    pub fn match_meta(mut self, name: &'a str, value: &'a str) -> Self {
+        self.lookups.push(Lookup::Meta{name, value});
+        self
+    }
+
+    fn matches(& self, e: & Element) -> bool {
+        for lookup in &self.lookups {
+            match *lookup {
+                Lookup::Name(name) => if name != e.name { return false; },
+                Lookup::HasMeta(name) => if !e.meta.contains_key(name) { return false; },
+                Lookup::Meta{name, value} => {
+                    if let Some(v) = e.meta.get(name) {
+                        if v != value { return false; }
+                    }
+                }
+            }
+        }
+
+        true // matches unless mismatch found
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct ElemHandle {
     i: usize,
@@ -44,12 +96,13 @@ impl ElemHandle {
         ElemHandle { i: 0 }
     }
 
-    pub fn new_child(self, mgr: &mut Manager, name: &str, value: Value) -> Result<ElemHandle, String> {
+    pub fn new_child(
+        self,
+        mgr: &mut Manager,
+        name: &str,
+        value: Value,
+    ) -> Result<ElemHandle, String> {
         mgr.create(name, value, Some(self))
-    }
-
-    pub fn child(self, mgr: &Manager, name: &str) -> Option<ElemHandle> {
-        mgr.lookup_child(self, name)
     }
 
     fn is_root(&self) -> bool {
@@ -90,7 +143,7 @@ impl Debug for Element {
             Value::Vacant => write!(f, "VACANT"),
             _ => {
                 let mut d = f.debug_struct("");
-                
+
                 if !self.name.is_empty() {
                     d.field("name", &self.name);
                     d.field("value", &self.value);
@@ -149,7 +202,7 @@ impl Manager {
         // New elements are always linked to from a parent
         // If new element parent was not specified then use the root element
         //  so that "top-level" names can be looked up.
-        let p = parent.unwrap_or_else( || ElemHandle::root() );
+        let p = parent.unwrap_or_else(|| ElemHandle::root());
         self.elems[p.i].children.push(e);
 
         // New elements do not link back to the root node
@@ -193,7 +246,7 @@ impl Manager {
     pub fn remove(&mut self, e: ElemHandle) -> Result<(), String> {
         let mut to_remove = VecDeque::<ElemHandle>::from([e]);
 
-        let p = self.parent(e).unwrap_or_else( || ElemHandle::root() );
+        let p = self.parent(e).unwrap_or_else(|| ElemHandle::root());
         self.children_mut(p).retain(|&x| x.i != e.i);
 
         while !to_remove.is_empty() {
@@ -252,6 +305,41 @@ impl Manager {
         &mut self.elem_mut(e).children
     }
 
+    pub fn descendents(&self, e: ElemHandle, lookup: &ElemLookup, look_past_match: bool) -> Vec<ElemHandle> {
+        let mut q = VecDeque::new();
+        let mut found = Vec::new();
+
+        //preload with direct children to begin check
+        for c in self.children(e) {
+            q.push_back(*c);
+        }
+
+        while !q.is_empty() {
+            let e = q.pop_front().unwrap();
+            let matches = lookup.matches(self.elem(e));
+
+            if matches { found.push(e) };
+
+            if !matches || look_past_match {
+                for c in self.children(e) {
+                    q.push_back(*c);
+                }
+            }
+        }
+
+        found
+    }
+
+    pub fn ancestor(&self, e: ElemHandle, lookup: &ElemLookup) -> Option<ElemHandle> {
+        let mut e = self.elem(e);
+        loop {
+            match e.parent {
+                Some(ph) => if lookup.matches(self.elem(ph)) { return Some(ph) } else { e = self.elem(ph) },
+                None => return None,
+            }
+        }
+    }
+
     /// Retrieves an element at the specified hierarchy.
     /// Any ancestor elements in the hierarchy that do not exist will be created
     ///  along with the element itself.
@@ -271,8 +359,11 @@ impl Manager {
             }
 
             if !child_found {
-                let result =
-                    self.create(*name, Value::None, if !e.is_root() { Some(e) } else { None });
+                let result = self.create(
+                    *name,
+                    Value::None,
+                    if !e.is_root() { Some(e) } else { None },
+                );
                 e = match result {
                     Ok(h) => h,
                     Err(e) => return Err(e),
@@ -395,9 +486,7 @@ mod tests {
     fn create_child_get_hierarchy() {
         let mut m = Manager::new();
         let parent = m.create("parent", Value::I32(42), None).unwrap();
-        let child = m
-            .create("child", Value::Bool(true), Some(parent))
-            .unwrap();
+        let child = m.create("child", Value::Bool(true), Some(parent)).unwrap();
 
         assert_eq!(m.hierarchy(child), vec!["parent", "child"]);
     }
@@ -462,5 +551,44 @@ mod tests {
 
         assert!(m.has_meta(e, "VL_Type"));
         assert_eq!(m.get_meta(e, "VL_Type").unwrap(), "VL_Task");
+    }
+
+    #[test]
+    fn get_missing_meta() {
+        let mut m = Manager::new();
+        let e = m.create("a", Value::None, None).unwrap();
+
+        assert!(!m.has_meta(e, "VL_Type"));
+        assert!(m.get_meta(e, "VL_Type").is_none());
+    }
+
+    #[test]
+    fn match_meta_name() {
+        let mut m = Manager::new();
+        let e = m.create("a", Value::None, None).unwrap();
+        let l = ElemLookup::new()
+            .match_name("a");
+
+        assert!(l.matches(m.elem(e)));
+    }
+
+    #[test]
+    fn descendent_meta() {
+        let mut m = Manager::new();
+        let a = m.create("a", Value::None, None).unwrap();
+        let b = a.new_child(&mut m, "b", Value::None).unwrap();
+        let c = b.new_child(&mut m, "c", Value::None).unwrap();
+        let d = c.new_child(&mut m, "d", Value::None).unwrap();
+
+        m.set_meta(a, "VL_Type", "VL_Task");
+        m.set_meta(b, "VL_Type", "VL_Channel");
+        m.set_meta(c, "VL_Type", "VL_Group");
+        m.set_meta(d, "VL_Type", "VL_Channel");
+
+        let l = ElemLookup::new().match_meta("VL_Type", "VL_Channel");
+
+        let chans = m.descendents(a, &l, true);
+
+        assert_eq!(chans.len(), 2);
     }
 }
