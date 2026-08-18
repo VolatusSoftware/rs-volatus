@@ -590,5 +590,9 @@ mod tests {
         let chans = m.descendents(a, &l, true);
 
         assert_eq!(chans.len(), 2);
+        
+        let names: Vec<&str> = chans.iter().map(|e| m.name(*e)).collect();
+        assert!(names.contains(&m.name(b)));
+        assert!(names.contains(&m.name(d)));
     }
 }
