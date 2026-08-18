@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, fmt::Debug};
+use std::{collections::{BTreeMap, VecDeque}, fmt::Debug};
 
 #[derive(Debug, PartialEq)]
 pub enum Value {
@@ -20,8 +20,6 @@ pub enum Value {
     Object,
 }
 
-type ElementIdx = usize;
-
 fn validate_elem_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name == "Meta" || name == "Value" {
         return Err(format!(
@@ -32,10 +30,90 @@ fn validate_elem_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub struct ElemHandle {
+    i: usize,
+}
+
+impl ElemHandle {
+    fn new(i: usize) -> Self {
+        ElemHandle { i }
+    }
+
+    fn root() -> Self {
+        ElemHandle { i: 0 }
+    }
+
+    pub fn new_child(self, mgr: &mut Manager, name: &str, value: Value) -> Result<ElemHandle, String> {
+        mgr.create(name, value, Some(self))
+    }
+
+    pub fn child(self, mgr: &Manager, name: &str) -> Option<ElemHandle> {
+        mgr.lookup_child(self, name)
+    }
+
+    fn is_root(&self) -> bool {
+        self.i == 0
+    }
+}
+
+impl Debug for ElemHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.i)
+    }
+}
+
+struct Element {
+    name: String,
+    value: Value,
+    parent: Option<ElemHandle>,
+    children: Vec<ElemHandle>,
+    meta: BTreeMap<String, String>,
+}
+
+impl Element {
+    fn new(name: &str, value: Value) -> Self {
+        // New elements start out orphaned and Manager will link appropriately.
+        Element {
+            name: name.to_owned(),
+            value,
+            parent: None,
+            children: vec![],
+            meta: BTreeMap::new(),
+        }
+    }
+}
+
+impl Debug for Element {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.value {
+            Value::Vacant => write!(f, "VACANT"),
+            _ => {
+                let mut d = f.debug_struct("");
+                
+                if !self.name.is_empty() {
+                    d.field("name", &self.name);
+                    d.field("value", &self.value);
+
+                    if let Some(p) = &self.parent {
+                        d.field("parent", &p.i);
+                    }
+                }
+
+                if self.children.len() > 0 {
+                    d.field("children", &self.children);
+                }
+
+                d.finish()
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Manager {
     elems: Vec<Element>,
-    vacant: Vec<ElementIdx>, // Tracks available vacant positions in the elems vector
+    vacant: Vec<usize>, // Tracks available vacant positions in the elems vector
 }
 
 impl Manager {
@@ -55,51 +133,81 @@ impl Manager {
         &mut self,
         name: &str,
         value: Value,
-        parent: Option<ElementIdx>,
-    ) -> Result<ElementIdx, String> {
+        parent: Option<ElemHandle>,
+    ) -> Result<ElemHandle, String> {
         validate_elem_name(name)?;
 
-        let idx = if self.vacant.len() > 0 {
+        // ElemHandle will either be a vacant spot from a deletion or the end of the vec
+        let e = ElemHandle::new(if self.vacant.len() > 0 {
             self.vacant.pop().unwrap()
         } else {
             self.elems.len()
-        };
+        });
+
         self.elems.push(Element::new(name, value));
 
         // New elements are always linked to from a parent
         // If new element parent was not specified then use the root element
         //  so that "top-level" names can be looked up.
-        let p_idx = parent.unwrap_or_else(|| 0);
-        self.elems[p_idx].children.push(idx);
+        let p = parent.unwrap_or_else( || ElemHandle::root() );
+        self.elems[p.i].children.push(e);
 
         // New elements do not link back to the root node
         // This simplifies hierarchy lookups and generation
-        if p_idx > 0 {
-            self.elems[idx].parent = Some(p_idx);
+        if !p.is_root() {
+            self.elems[e.i].parent = Some(p);
         };
 
-        Ok(idx)
+        Ok(e)
+    }
+
+    fn elem(&self, e: ElemHandle) -> &Element {
+        &self.elems[e.i]
+    }
+
+    fn elem_mut(&mut self, e: ElemHandle) -> &mut Element {
+        &mut self.elems[e.i]
+    }
+
+    fn meta(&self, e: ElemHandle) -> &BTreeMap<String, String> {
+        &self.elem(e).meta
+    }
+
+    fn meta_mut(&mut self, e: ElemHandle) -> &mut BTreeMap<String, String> {
+        &mut self.elem_mut(e).meta
+    }
+
+    pub fn set_meta(&mut self, e: ElemHandle, name: &str, value: &str) {
+        self.meta_mut(e).insert(name.to_owned(), value.to_owned());
+    }
+
+    pub fn get_meta(&self, e: ElemHandle, name: &str) -> Option<&String> {
+        self.meta(e).get(name)
+    }
+
+    pub fn has_meta(&self, e: ElemHandle, name: &str) -> bool {
+        self.meta(e).contains_key(name)
     }
 
     /// Removes an element from the tree along with all of its descendents.
-    pub fn remove(&mut self, idx: ElementIdx) -> Result<(), String> {
-        let mut to_remove = VecDeque::<ElementIdx>::from([idx]);
+    pub fn remove(&mut self, e: ElemHandle) -> Result<(), String> {
+        let mut to_remove = VecDeque::<ElemHandle>::from([e]);
 
-        let p = self.parent(idx).unwrap_or_else(|| 0);
-        self.elems[p].children.retain(|&x| x != idx);
+        let p = self.parent(e).unwrap_or_else( || ElemHandle::root() );
+        self.children_mut(p).retain(|&x| x.i != e.i);
 
         while !to_remove.is_empty() {
-            let idx = to_remove.pop_front().unwrap();
-            for child_idx in &self.elems[idx].children {
-                to_remove.push_back(*child_idx);
+            let e = to_remove.pop_front().unwrap();
+            for c in self.children(e) {
+                to_remove.push_back(*c);
             }
 
             // To make sure existing indices aren't invalidated and don't have
             //  to be adjusted, a "blank" is replaced into the vec.
             // The position is tracked in vacant so the now "blank" position can
             //  be used for new elements.
-            self.vacant.push(idx);
-            self.elems[idx].value = Value::Vacant;
+            self.vacant.push(e.i);
+            self.elem_mut(e).value = Value::Vacant;
         }
 
         Ok(())
@@ -111,72 +219,81 @@ impl Manager {
         self.elems.len() - 1 - self.vacant.len()
     }
 
-    /// Returns the name of an element given its index.
-    pub fn name(&self, idx: ElementIdx) -> &str {
-        &self.elems[idx].name
+    /// Returns the name of an element given its handle.
+    pub fn name(&self, e: ElemHandle) -> &str {
+        &self.elem(e).name
     }
 
-    /// Returns an immutable reference of an element's value given its index.
+    /// Returns an immutable reference of an element's value given its handle.
     /// Use `value_mut()` for a mutable reference.
-    pub fn value(&self, idx: ElementIdx) -> &Value {
-        &self.elems[idx].value
+    pub fn value(&self, e: ElemHandle) -> &Value {
+        &self.elem(e).value
     }
 
     /// Returns a mutable reference to an element's value so it can be changed.
-    pub fn value_mut(&mut self, idx: ElementIdx) -> &mut Value {
-        &mut self.elems[idx].value
+    pub fn value_mut(&mut self, e: ElemHandle) -> &mut Value {
+        &mut self.elem_mut(e).value
     }
 
     /// Changes the name for an element given its index and the new name.
-    pub fn rename(&mut self, idx: ElementIdx, name: &str) -> Result<(), String> {
+    pub fn rename(&mut self, e: ElemHandle, name: &str) -> Result<(), String> {
         validate_elem_name(name)?;
 
-        self.elems[idx].name = name.to_owned();
+        self.elem_mut(e).name = name.to_owned();
 
         Ok(())
     }
 
-    /// Retrieves an element at the specified hierarchy. Any ancestor elements in the hierarchy
-    /// that do not exist will be created along with the element itself.
-    pub fn obtain(&mut self, hierarchy: &Vec<&str>) -> Result<ElementIdx, String> {
+    pub fn children(&self, e: ElemHandle) -> &Vec<ElemHandle> {
+        &self.elem(e).children
+    }
+
+    pub fn children_mut(&mut self, e: ElemHandle) -> &mut Vec<ElemHandle> {
+        &mut self.elem_mut(e).children
+    }
+
+    /// Retrieves an element at the specified hierarchy.
+    /// Any ancestor elements in the hierarchy that do not exist will be created
+    ///  along with the element itself.
+    pub fn obtain(&mut self, hierarchy: &Vec<&str>) -> Result<ElemHandle, String> {
         let mut child_found;
-        let mut idx = 0;
+        let mut e = ElemHandle::root();
 
         for name in hierarchy {
             child_found = false;
 
-            for child_idx in &self.elems[idx].children {
-                if self.name(*child_idx) == *name {
-                    idx = *child_idx;
+            for c in self.children(e) {
+                if self.name(*c) == *name {
+                    e = *c;
                     child_found = true;
                     break;
                 }
             }
 
             if !child_found {
-                let e =
-                    self.create(*name, Value::None, if idx > 0 { Some(idx) } else { None });
-                match e {
-                    Ok(new_idx) => idx = new_idx,
+                let result =
+                    self.create(*name, Value::None, if !e.is_root() { Some(e) } else { None });
+                e = match result {
+                    Ok(h) => h,
                     Err(e) => return Err(e),
-                }
+                };
             }
         }
 
-        Ok(idx)
+        Ok(e)
     }
 
-    /// Retrieves an element index given its named hierarchy. If the element does not
+    /// Retrieves an element handle given its named hierarchy. If the element does not
     /// exist, `None` will be returned.
-    pub fn lookup(&self, hierarchy: &Vec<&str>) -> Option<ElementIdx> {
-        let mut idx: ElementIdx = 0;
+    pub fn lookup(&self, hierarchy: &Vec<&str>) -> Option<ElemHandle> {
+        let mut e = ElemHandle::root();
         let mut child_found;
         for name in hierarchy {
             child_found = false;
 
-            for child_idx in &self.elems[idx].children {
-                if self.name(*child_idx) == *name {
-                    idx = *child_idx;
+            for c in self.children(e) {
+                if self.name(*c) == *name {
+                    e = *c;
                     child_found = true;
                     break;
                 }
@@ -187,76 +304,49 @@ impl Manager {
             }
         }
 
-        Some(idx)
+        Some(e)
     }
 
-    /// Returns the parent index of the specified element, or `None` if the element
+    pub fn lookup_child(&self, e: ElemHandle, name: &str) -> Option<ElemHandle> {
+        for c in self.children(e) {
+            if self.name(*c) == name {
+                return Some(*c);
+            }
+        }
+
+        None
+    }
+
+    /// Returns the parent handle of the specified element, or `None` if the element
     /// does not have a parent.
-    pub fn parent(&self, idx: ElementIdx) -> Option<ElementIdx> {
-        self.elems[idx].parent
+    pub fn parent(&self, e: ElemHandle) -> Option<ElemHandle> {
+        self.elem(e).parent
     }
 
-    /// Returns whether or not the element index contains a vacant slot.
-    /// This means the index is not valid for other operations.
-    pub fn is_vacant(&self, idx: ElementIdx) -> bool {
-        self.elems[idx].value == Value::Vacant
+    /// Returns whether or not the element handle is a vacant slot.
+    /// This means the handle is not valid for other operations.
+    pub fn is_vacant(&self, e: ElemHandle) -> bool {
+        self.elem(e).value == Value::Vacant
     }
 
     /// Returns the name hierarchy of the specified element index.
-    pub fn hierarchy(&self, e: ElementIdx) -> Vec<String> {
+    pub fn hierarchy(&self, e: ElemHandle) -> Vec<String> {
         let mut h = vec![];
-        let mut idx = e;
+        let mut e = e;
 
         // Follow parent index until no further parent links.
         loop {
-            h.push(self.name(idx).to_owned());
-            match self.elems[idx].parent {
-                Some(p) => idx = p,
+            h.push(self.name(e).to_owned());
+            match self.parent(e) {
+                Some(p) => e = p,
                 None => break,
             }
         }
 
-        // Since we worked from child-most towards root, need to fix back from parent-most to element.
+        // Since we worked from child-most towards root, need to reverse from parent-most to element.
         h.reverse();
 
         h
-    }
-}
-
-struct Element {
-    name: String,
-    value: Value,
-    parent: Option<ElementIdx>,
-    children: Vec<ElementIdx>,
-}
-
-impl Element {
-    fn new(name: &str, value: Value) -> Self {
-        // New elements start out orphaned and Manager will link appropriately.
-        Element {
-            name: name.to_owned(),
-            value,
-            parent: None,
-            children: vec![],
-        }
-    }
-}
-
-impl Debug for Element {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut d = f.debug_struct("");
-        d.field("name", &self.name);
-        d.field("value", &self.value);
-
-        if let Some(p) = self.parent {
-            d.field("parent", &p);
-        }
-
-        if self.children.len() > 0 {
-            d.field("children", &self.children);
-        }
-
-        d.finish()
     }
 }
 
@@ -358,9 +448,19 @@ mod tests {
         let d = m.create("d", Value::None, Some(c)).unwrap();
 
         m.remove(c).unwrap();
-        
+
         assert_eq!(m.len(), 2);
         assert_eq!(m.hierarchy(b), vec!["a", "b"]);
         assert!(m.is_vacant(d));
+    }
+
+    #[test]
+    fn set_get_meta() {
+        let mut m = Manager::new();
+        let e = m.create("a", Value::None, None).unwrap();
+        m.set_meta(e, "VL_Type", "VL_Task");
+
+        assert!(m.has_meta(e, "VL_Type"));
+        assert_eq!(m.get_meta(e, "VL_Type").unwrap(), "VL_Task");
     }
 }

@@ -2,16 +2,18 @@ use volatus::config::{Manager, Value};
 
 fn main() {
     let mut m = Manager::new();
+
     let p = m.create("alpha", Value::I32(42), None).unwrap();
-    let c1 = m
-        .create("beta", Value::Bool(true), Some(p))
+
+    let c1 = p.new_child(&mut m, "beta", Value::Bool(true)).unwrap();
+    
+    let l = c1
+        .new_child(&mut m, "gamma", Value::Str("Meowdy".to_owned()))
         .unwrap();
-    let _l = m
-        .create("gamma", Value::Str("Meowdy".to_owned()), Some(c1))
-        .unwrap();
-    let _c2 = m
-        .create("delta", Value::Bool(false), Some(p))
-        .unwrap();
+    
+    let _c2 = p.new_child(&mut m, "delta", Value::Bool(false)).unwrap();
+
+    m.remove(l).unwrap();
 
     println!("{m:?}");
 }
