@@ -3,6 +3,8 @@ use std::{
     fmt::Debug,
 };
 
+use serde_json;
+
 #[derive(Debug, PartialEq)]
 pub enum Value {
     Vacant, // Filler when an element has been "removed" but don't want to shuffle indices
@@ -83,17 +85,15 @@ impl <'a> ElemLookup<'a> {
 }
 
 #[derive(Clone, Copy)]
-pub struct ElemHandle {
-    i: usize,
-}
+pub struct ElemHandle(usize);
 
 impl ElemHandle {
     fn new(i: usize) -> Self {
-        ElemHandle { i }
+        ElemHandle(i)
     }
 
     fn root() -> Self {
-        ElemHandle { i: 0 }
+        ElemHandle(0)
     }
 
     pub fn new_child(
@@ -106,13 +106,13 @@ impl ElemHandle {
     }
 
     fn is_root(&self) -> bool {
-        self.i == 0
+        self.0 == 0
     }
 }
 
 impl Debug for ElemHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.i)
+        write!(f, "{}", self.0)
     }
 }
 
@@ -149,7 +149,7 @@ impl Debug for Element {
                     d.field("value", &self.value);
 
                     if let Some(p) = &self.parent {
-                        d.field("parent", &p.i);
+                        d.field("parent", &p.0);
                     }
                 }
 
@@ -161,6 +161,32 @@ impl Debug for Element {
             }
         }
     }
+}
+
+pub struct JsonLoader {}
+
+impl JsonLoader {
+    pub fn from_json(json: &str) -> Result<Manager, String> {
+        let v: serde_json::Value = match serde_json::from_str(json) {
+            Ok(value) => value,
+            Err(e) => {return Err(format!("{e}"));},
+        };
+
+        let mut m = Manager::new();
+
+        let root = m.root();
+
+        Self::recurse_json(&mut m, v, root)?;
+
+        Ok(m)
+    }
+
+    // fn recurse_json (m: &mut Manager, v: serde_json::Value, e: ElemHandle) -> Result<(), String> {
+    //     match v {
+    //         serde_json::Value::Null
+    //     }
+    //     todo!()
+    // }
 }
 
 #[derive(Debug)]
@@ -179,6 +205,10 @@ impl Manager {
             ],
             vacant: vec![],
         }
+    }
+
+    pub fn root(&self) -> ElemHandle {
+        ElemHandle(0)
     }
 
     /// Creates a new element in the tree, optional as a child of an existing parent.
@@ -203,23 +233,23 @@ impl Manager {
         // If new element parent was not specified then use the root element
         //  so that "top-level" names can be looked up.
         let p = parent.unwrap_or_else(|| ElemHandle::root());
-        self.elems[p.i].children.push(e);
+        self.elems[p.0].children.push(e);
 
         // New elements do not link back to the root node
         // This simplifies hierarchy lookups and generation
         if !p.is_root() {
-            self.elems[e.i].parent = Some(p);
+            self.elems[e.0].parent = Some(p);
         };
 
         Ok(e)
     }
 
     fn elem(&self, e: ElemHandle) -> &Element {
-        &self.elems[e.i]
+        &self.elems[e.0]
     }
 
     fn elem_mut(&mut self, e: ElemHandle) -> &mut Element {
-        &mut self.elems[e.i]
+        &mut self.elems[e.0]
     }
 
     fn meta(&self, e: ElemHandle) -> &BTreeMap<String, String> {
@@ -247,7 +277,7 @@ impl Manager {
         let mut to_remove = VecDeque::<ElemHandle>::from([e]);
 
         let p = self.parent(e).unwrap_or_else(|| ElemHandle::root());
-        self.children_mut(p).retain(|&x| x.i != e.i);
+        self.children_mut(p).retain(|&x| x.0 != e.0);
 
         while !to_remove.is_empty() {
             let e = to_remove.pop_front().unwrap();
@@ -259,7 +289,7 @@ impl Manager {
             //  to be adjusted, a "blank" is replaced into the vec.
             // The position is tracked in vacant so the now "blank" position can
             //  be used for new elements.
-            self.vacant.push(e.i);
+            self.vacant.push(e.0);
             self.elem_mut(e).value = Value::Vacant;
         }
 

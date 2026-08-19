@@ -11,3 +11,4 @@ nifpga = ["modules"]
 gui = ["modules"]
 
 [dependencies]
+serde_json = "1.0.151"
