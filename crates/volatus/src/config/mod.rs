@@ -788,6 +788,17 @@ mod tests {
 }"#;
 
         let m = JsonLoader::from_json(json).unwrap();
-        println!("{m:#?}");
+        println!("{m:#?}"); // cargo test -- --show-output
+
+        let lookup = ElemLookup::new()
+            .match_meta("VL_Type", "VL_Task")
+            .match_name("GUI_Manager");
+
+        let task = m.descendents(m.root(), &lookup, false)[0];
+
+        assert_eq!(
+            m.hierarchy(task),
+            ["Volatus", "TestSystem", "Clusters", "TestCluster", "Nodes", "Test_GUI", "Tasks", "GUI_Manager"]
+        );
     }
 }
